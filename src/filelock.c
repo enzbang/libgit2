@@ -27,7 +27,6 @@
 #include "filelock.h"
 #include "fileops.h"
 
-static const char *GIT_FILELOCK_EXTENSION = ".lock\0";
 static const size_t GIT_FILELOCK_EXTLENGTH = 6;
 
 #define BUILD_PATH_LOCK(_lock, _path) { \
