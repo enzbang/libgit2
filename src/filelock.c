@@ -54,11 +54,29 @@ int git_filelock_init(git_filelock *lock, const char *path)
 int git_filelock_lock(git_filelock *lock, int append)
 {
 	char path_lock[GIT_PATH_MAX];
+	char path_topdir[GIT_PATH_MAX];
+	int topdir_len;
+	int error = GIT_SUCCESS;
+	const int mode = 0755; /* or 0777 ? */
+
 	BUILD_PATH_LOCK(lock, path_lock);
 
 	/* If file already exists, we cannot create a lock */
 	if (gitfo_exists(path_lock) == 0)
 		return GIT_EOSERR;
+
+	topdir_len = git__dirname_r(path_topdir, sizeof(path_topdir), path_lock);
+	if (topdir_len < 0)
+		return GIT_EINVALIDPATH;
+
+	if (path_topdir[topdir_len - 1] != '/') {
+		path_topdir[topdir_len] = '/';
+		path_topdir[topdir_len + 1] = '\0';
+	}
+
+	error = gitfo_mkdir_recurs(path_topdir, mode);
+	if (error < GIT_SUCCESS)
+		return error;
 
 	lock->file_lock = gitfo_creat(path_lock, 0666);
 
@@ -84,7 +102,7 @@ int git_filelock_lock(git_filelock *lock, int append)
 		gitfo_close(source);
 	}
 
-	return GIT_SUCCESS;
+	return error;
 }
 
 void git_filelock_unlock(git_filelock *lock)
