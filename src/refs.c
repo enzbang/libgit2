@@ -678,6 +678,7 @@ static int check_valid_ref_char(char ch)
 	case '\\':
 	case '?':
 	case '[':
+	case '*':
 		return GIT_ERROR;
 		break;
 
@@ -732,14 +733,8 @@ int git_reference__normalize_name(char *buffer_out, const char *name, git_rtype 
 			}
 		}
 
-		if (*current == '/') {
-			/* Slashes are not authorized in symbolic reference name */
-			if (type == GIT_REF_SYMBOLIC) {
-				return GIT_EINVALIDREFNAME;
-			}
-
+		if (*current == '/')
 			contains_a_slash = 1;
-		}
 
 		*buffer_out++ = *current++;
 	}
