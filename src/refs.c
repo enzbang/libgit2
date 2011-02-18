@@ -31,6 +31,8 @@
 #define HASH_SEED 2147483647
 #define MAX_NESTING_LEVEL 5
 
+static int reference_write(git_reference *ref);
+
 static const int default_table_size = 32;
 
 static uint32_t reftable_hash(const void *key)
@@ -49,18 +51,6 @@ static int reftable_haskey(void *reference, const void *key)
 	return strcmp(name, ref->name) == 0;
 }
 
-
-static int check_refname(const char *name) 
-{
-	/*
-	 * TODO: To be implemented
-	 * Check if the given name is a valid name
-	 * for a reference
-	 */
-	
-	return name ? GIT_SUCCESS : GIT_ERROR;
-}
-
 static void reference_free(git_reference *reference)
 {
 	if (reference == NULL)
@@ -75,7 +65,7 @@ static void reference_free(git_reference *reference)
 	free(reference);
 }
 
-static int reference__create(git_reference **ref_out, git_repository *repo, const char *name, git_rtype type) {
+static int reference_create(git_reference **ref_out, git_repository *repo, const char *name, git_rtype type) {
 	char normalized[MAX_GITDIR_TREE_STRUCTURE_PATH_LENGTH];
 	int error = GIT_SUCCESS;
 	git_reference *reference = NULL;
@@ -118,7 +108,7 @@ int git_reference_create_symbolic(git_reference **ref_out, git_repository *repo,
 	int error = GIT_SUCCESS;
 	git_reference *ref = NULL;
 
-	error = reference__create(&ref, repo, name, GIT_REF_SYMBOLIC);
+	error = reference_create(&ref, repo, name, GIT_REF_SYMBOLIC);
 	if (error < GIT_SUCCESS)
 		goto cleanup;
 
@@ -127,11 +117,8 @@ int git_reference_create_symbolic(git_reference **ref_out, git_repository *repo,
 	if (error < GIT_SUCCESS)
 		goto cleanup;
 
+	/* set the target; this will write the reference on disk */
 	error = git_reference_set_target(ref, normalized);
-	if (error < GIT_SUCCESS)
-		goto cleanup;
-
-	error = git_reference_write(ref);
 	if (error < GIT_SUCCESS)
 		goto cleanup;
 
@@ -149,15 +136,12 @@ int git_reference_create_oid(git_reference **ref_out, git_repository *repo, cons
 	int error = GIT_SUCCESS;
 	git_reference *ref = NULL;
 
-	error = reference__create(&ref, repo, name, GIT_REF_OID);
+	error = reference_create(&ref, repo, name, GIT_REF_OID);
 	if (error < GIT_SUCCESS)
 		goto cleanup;
 
+	/* set the oid; this will write the reference on disk */
 	error = git_reference_set_oid(ref, id);
-	if (error < GIT_SUCCESS)
-		goto cleanup;
-
-	error = git_reference_write(ref);
 	if (error < GIT_SUCCESS)
 		goto cleanup;
 
@@ -175,7 +159,6 @@ static int parse_sym_ref(git_reference *ref, gitfo_buf *file_content)
 	const unsigned int header_len = strlen(GIT_SYMREF);
 	const char *refname_start;
 	char *eol;
-	int error;
 
 	refname_start = (const char *)file_content->data;
 
@@ -189,9 +172,9 @@ static int parse_sym_ref(git_reference *ref, gitfo_buf *file_content)
 
 	refname_start += header_len;
 
-	error = git_reference_set_target(ref, refname_start);
-	if (error < GIT_SUCCESS)
-		return error;
+	ref->target.ref = git__strdup(refname_start);
+	if (ref->target.ref == NULL)
+		return GIT_ENOMEM;
 
 	/* remove newline at the end of file */
 	eol = strchr(ref->target.ref, '\n');
@@ -209,8 +192,6 @@ static int parse_oid_ref(git_reference *ref, gitfo_buf *file_content)
 {
 	char *buffer;
 	git_oid id;
-	int error;
-
 	buffer = (char *)file_content->data;
 
 	/* File format: 40 chars (OID) + newline */
@@ -220,9 +201,7 @@ static int parse_oid_ref(git_reference *ref, gitfo_buf *file_content)
 	if (git_oid_mkstr(&id, buffer) < GIT_SUCCESS)
 		return GIT_EREFCORRUPTED;
 
-	error = git_reference_set_oid(ref, &id);
-	if (error < GIT_SUCCESS)
-		return error;
+	git_oid_cpy(&ref->target.oid, &id);
 
 	buffer = buffer + GIT_OID_HEXSZ;
 	if (*buffer == '\r')
@@ -272,20 +251,18 @@ static int lookup_loose_ref(
 		goto cleanup;
 
 	if (git__prefixcmp((const char *)(ref_file.data), GIT_SYMREF) == 0) {
-		error = reference__create(&ref, repo, name, GIT_REF_SYMBOLIC);
+		error = reference_create(&ref, repo, name, GIT_REF_SYMBOLIC);
 		if (error < GIT_SUCCESS)
 			goto cleanup;
 
 		error = parse_sym_ref(ref, &ref_file);
 	} else {
-		error = reference__create(&ref, repo, name, GIT_REF_OID);
+		error = reference_create(&ref, repo, name, GIT_REF_OID);
 		if (error < GIT_SUCCESS)
 			goto cleanup;
 
 		error = parse_oid_ref(ref, &ref_file);
 	}
-
-	ref->modified = 0;
 
 	if (error < GIT_SUCCESS)
 		goto cleanup;
@@ -404,16 +381,13 @@ static int parse_packed_line(
 	if (refname[refname_len - 1] == '\r')
 		refname[refname_len - 1] = 0;
 
-	error = reference__create(&ref, repo, refname, GIT_REF_OID);
+	error = reference_create(&ref, repo, refname, GIT_REF_OID);
 	if (error < GIT_SUCCESS)
 		goto cleanup;
 
-	error = git_reference_set_oid(ref, &id);
-	if (error < GIT_SUCCESS)
-		goto cleanup;
+	git_oid_cpy(&ref->target.oid, &id);
 
 	ref->packed = 1;
-	ref->modified = 0;
 
 	*ref_out = ref;
 	*buffer_out = refname_end + 1;
@@ -503,9 +477,7 @@ int git_reference_set_oid(git_reference *ref, const git_oid *id)
 
 	git_oid_cpy(&ref->target.oid, id);
 
-	ref->modified = 1;
-
-	return GIT_SUCCESS;
+	return reference_write(ref);
 }
 
 int git_reference_set_target(git_reference *ref, const char *target)
@@ -518,9 +490,7 @@ int git_reference_set_target(git_reference *ref, const char *target)
 	if (ref->target.ref == NULL)
 		return GIT_ENOMEM;
 
-	ref->modified = 1;
-
-	return GIT_SUCCESS;
+	return reference_write(ref);
 }
 
 const git_oid *git_reference_oid(git_reference *ref)
@@ -535,6 +505,8 @@ const git_oid *git_reference_oid(git_reference *ref)
 
 const char *git_reference_target(git_reference *ref)
 {
+	assert(ref);
+
 	if (ref->type != GIT_REF_SYMBOLIC)
 		return NULL;
 
@@ -583,27 +555,22 @@ int git_reference_resolve(git_reference **resolved_ref, git_reference *ref)
 	return GIT_ETOONESTEDSYMREF;
 }
 
-int git_reference_write(git_reference *ref)
+static int reference_write(git_reference *ref)
 {
 	git_filelock lock;
-	git_reference *looked_up_reference;
 	char ref_path[GIT_PATH_MAX];
 	int error, contents_size;
 	char *ref_contents = NULL;
 
-	if (ref->type == GIT_REF_INVALID || ref->type == GIT_REF_ANY)
-		return GIT_EINVALIDREFSTATE;
-
-	if (!ref->modified)
-		return GIT_SUCCESS;
+	assert(ref->type == GIT_REF_OID || ref->type == GIT_REF_SYMBOLIC);
 
 	git__joinpath(ref_path, ref->owner->path_repository, ref->name);
 
 	if ((error = git_filelock_init(&lock, ref_path)) < GIT_SUCCESS)
-		goto cleanup;
+		return error;
 
 	if ((error = git_filelock_lock(&lock, 0)) < GIT_SUCCESS)
-		goto unlock;
+		return error;
 
 	if (ref->type == GIT_REF_OID) {
 
@@ -629,6 +596,7 @@ int git_reference_write(git_reference *ref)
 		strcat(ref_contents, ref->target.ref);
 	}
 
+	/* TODO: win32 carriage return when writing references in Windows? */
 	ref_contents[contents_size - 1] = '\n';
 
 	if ((error = git_filelock_write(&lock, ref_contents, contents_size)) < GIT_SUCCESS)
@@ -637,24 +605,12 @@ int git_reference_write(git_reference *ref)
 	if ((error = git_filelock_commit(&lock)) < GIT_SUCCESS)
 		goto unlock;
 
-	ref->modified = 0;
-
-	looked_up_reference = git_hashtable_lookup(ref->owner->references.cache, ref->name);
-
-	if (looked_up_reference == NULL) {
-		error = git_hashtable_insert(ref->owner->references.cache, ref->name, ref);
-		if (error < GIT_SUCCESS)
-			goto cleanup;
-	}
-
-	goto cleanup;
+	free(ref_contents);
+	return GIT_SUCCESS;
 
 unlock:
 	git_filelock_unlock(&lock);
-
-cleanup:
 	free(ref_contents);
-
 	return error;
 }
 
